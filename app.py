@@ -41,7 +41,22 @@ def get_model():
                 "Please ensure pneumonia_classifier.h5 is committed to the repository."
             )
         print(f"⏳ Loading model from {MODEL_PATH}...")
-        _model = load_model(MODEL_PATH, compile=False)
+
+        # Compatibility shim: older .h5 models use 'batch_shape' in InputLayer config,
+        # which was renamed in newer Keras builds. This patch remaps it transparently.
+        class CompatInputLayer(tf.keras.layers.InputLayer):
+            def __init__(self, *args, **kwargs):
+                if 'batch_shape' in kwargs:
+                    batch_shape = kwargs.pop('batch_shape')
+                    if batch_shape is not None:
+                        kwargs['input_shape'] = tuple(batch_shape[1:])
+                super().__init__(*args, **kwargs)
+
+        _model = load_model(
+            MODEL_PATH,
+            compile=False,
+            custom_objects={'InputLayer': CompatInputLayer}
+        )
         print("✅ Model loaded successfully.")
     return _model
 
