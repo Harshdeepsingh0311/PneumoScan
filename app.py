@@ -28,9 +28,69 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'pneumonia_classifier.h5')
 
-# --- Lazy model loading ---
-# Model is loaded on first request to avoid startup OOM crash on free-tier hosts.
-_model = None
+def _fix_model_config(obj):
+    """
+    Recursively patch model config dict to fix cross-version Keras issues:
+    1. DTypePolicy  — Keras 3 serialises dtype as a DTypePolicy object;
+                      older Keras only understands plain strings like 'float32'.
+    2. batch_shape  — Old Keras used 'batch_shape' in InputLayer;
+                      newer Keras renamed it to 'batch_input_shape'.
+    """
+    if isinstance(obj, dict):
+        # --- Fix 1: DTypePolicy → plain dtype string ---
+        if 'dtype' in obj and isinstance(obj['dtype'], dict):
+            dtype_info = obj['dtype']
+            if dtype_info.get('class_name') == 'DTypePolicy':
+                dtype_name = dtype_info.get('config', {}).get('name', 'float32')
+                obj = dict(obj)
+                obj['dtype'] = dtype_name
+
+        # --- Fix 2: batch_shape → batch_input_shape in InputLayer config ---
+        if obj.get('class_name') == 'InputLayer' and isinstance(obj.get('config'), dict):
+            cfg = dict(obj['config'])
+            if 'batch_shape' in cfg:
+                cfg['batch_input_shape'] = cfg.pop('batch_shape')
+                obj = dict(obj)
+                obj['config'] = cfg
+
+        return {k: _fix_model_config(v) for k, v in obj.items()}
+
+    elif isinstance(obj, list):
+        return [_fix_model_config(item) for item in obj]
+
+    return obj
+
+
+def _load_patched_model(model_path):
+    """
+    Patch the H5 model's config JSON in-memory before handing it to Keras.
+    This avoids deep registry errors that custom_objects cannot intercept.
+    """
+    import h5py, json, shutil, tempfile
+
+    # Work on a temp copy so we never corrupt the original
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.h5')
+    os.close(tmp_fd)
+    shutil.copy2(model_path, tmp_path)
+
+    try:
+        with h5py.File(tmp_path, 'r+') as f:
+            if 'model_config' in f.attrs:
+                raw = f.attrs['model_config']
+                if isinstance(raw, bytes):
+                    raw = raw.decode('utf-8')
+                config = json.loads(raw)
+                patched = _fix_model_config(config)
+                f.attrs['model_config'] = json.dumps(patched)
+                print("✅ Model config patched for Keras compatibility.")
+
+        model = load_model(tmp_path, compile=False)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return model
+
 
 def get_model():
     global _model
@@ -41,24 +101,10 @@ def get_model():
                 "Please ensure pneumonia_classifier.h5 is committed to the repository."
             )
         print(f"⏳ Loading model from {MODEL_PATH}...")
-
-        # Compatibility shim: older .h5 models use 'batch_shape' in InputLayer config,
-        # which was renamed in newer Keras builds. This patch remaps it transparently.
-        class CompatInputLayer(tf.keras.layers.InputLayer):
-            def __init__(self, *args, **kwargs):
-                if 'batch_shape' in kwargs:
-                    batch_shape = kwargs.pop('batch_shape')
-                    if batch_shape is not None:
-                        kwargs['input_shape'] = tuple(batch_shape[1:])
-                super().__init__(*args, **kwargs)
-
-        _model = load_model(
-            MODEL_PATH,
-            compile=False,
-            custom_objects={'InputLayer': CompatInputLayer}
-        )
+        _model = _load_patched_model(MODEL_PATH)
         print("✅ Model loaded successfully.")
     return _model
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
