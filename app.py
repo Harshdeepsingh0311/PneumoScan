@@ -41,7 +41,7 @@ def get_model():
                 "Please ensure pneumonia_classifier.h5 is committed to the repository."
             )
         print(f"⏳ Loading model from {MODEL_PATH}...")
-        _model = load_model(MODEL_PATH)
+        _model = load_model(MODEL_PATH, compile=False)
         print("✅ Model loaded successfully.")
     return _model
 
