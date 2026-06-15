@@ -25,35 +25,51 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Configuration for allowed file extensions
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
+_model = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'pneumonia_classifier.h5')
 
 def _fix_model_config(obj):
     """
-    Recursively patch model config dict to fix cross-version Keras issues:
-    1. DTypePolicy  — Keras 3 serialises dtype as a DTypePolicy object;
-                      older Keras only understands plain strings like 'float32'.
-    2. batch_shape  — Old Keras used 'batch_shape' in InputLayer;
-                      newer Keras renamed it to 'batch_input_shape'.
+    Recursively patch model config dict to fix cross-version Keras issues.
     """
+    import ast
     if isinstance(obj, dict):
+        new_obj = dict(obj)
+
         # --- Fix 1: DTypePolicy → plain dtype string ---
-        if 'dtype' in obj and isinstance(obj['dtype'], dict):
-            dtype_info = obj['dtype']
+        if 'dtype' in new_obj and isinstance(new_obj['dtype'], dict):
+            dtype_info = new_obj['dtype']
             if dtype_info.get('class_name') == 'DTypePolicy':
                 dtype_name = dtype_info.get('config', {}).get('name', 'float32')
-                obj = dict(obj)
-                obj['dtype'] = dtype_name
+                new_obj['dtype'] = dtype_name
 
-        # --- Fix 2: batch_shape → batch_input_shape in InputLayer config ---
-        if obj.get('class_name') == 'InputLayer' and isinstance(obj.get('config'), dict):
-            cfg = dict(obj['config'])
+        # --- Fix 2: batch_shape → batch_input_shape in InputLayer ---
+        if new_obj.get('class_name') == 'InputLayer' and isinstance(new_obj.get('config'), dict):
+            cfg = dict(new_obj['config'])
             if 'batch_shape' in cfg:
                 cfg['batch_input_shape'] = cfg.pop('batch_shape')
-                obj = dict(obj)
-                obj['config'] = cfg
+                new_obj['config'] = cfg
 
-        return {k: _fix_model_config(v) for k, v in obj.items()}
+        # --- Fix 3: Aggressive Shape String to List Conversion ---
+        for k, v in new_obj.items():
+            if isinstance(v, str):
+                # Try to parse any string that looks like a shape (contains commas and (None or numbers))
+                if ',' in v and ('None' in v or any(c.isdigit() for c in v)):
+                    try:
+                        # Handle both bracketed and non-bracketed strings
+                        s = v.strip()
+                        if not (s.startswith('(') or s.startswith('[')):
+                            s = f"({s})"
+                        parsed = ast.literal_eval(s)
+                        if isinstance(parsed, (tuple, list)):
+                            new_obj[k] = list(parsed)
+                    except Exception:
+                        pass
+
+        # Recursively apply to all values
+        return {k: _fix_model_config(v) for k, v in new_obj.items()}
 
     elif isinstance(obj, list):
         return [_fix_model_config(item) for item in obj]
